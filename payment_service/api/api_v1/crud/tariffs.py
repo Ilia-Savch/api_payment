@@ -1,8 +1,15 @@
+from collections.abc import Sequence
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payment_service.core.models.tariff import Tariff
+
+
+async def get_tariffs(session: AsyncSession) -> Sequence[Tariff]:
+    result = await session.scalars(select(Tariff).order_by(Tariff.id))
+    return result.all()
 
 
 async def sync_tariff_prices(

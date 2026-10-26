@@ -1,30 +1,21 @@
 import asyncio
 import logging
-import os
-from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import uuid4
 
 import pytest
-from alembic.config import Config
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import (
-    Column,
-    Connection,
-    Integer,
-    MetaData,
     Table,
     delete,
     func,
     insert,
     select,
 )
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alembic import command
 from payment_service.api.api_v1.dependencies.database import get_session
 from payment_service.core.config import TariffsConfig
 from payment_service.core.models import Payment, PaymentMethod, PaymentStatus, Tariff
@@ -32,20 +23,6 @@ from payment_service.core.models.db_helper import DatabaseHelper
 from payment_service.services.tariffs import sync_tariffs
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
-
-
-@pytest.fixture
-async def migrated_database(database: tuple[DatabaseHelper, Table]) -> DatabaseHelper:
-    helper, _ = database
-
-    def migrate(connection: Connection) -> None:
-        config = Config("alembic.ini")
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
-
-    async with helper.engine.begin() as connection:
-        await connection.run_sync(migrate)
-    return helper
 
 
 async def test_initial_tariffs_survive_repeated_and_concurrent_startup(
@@ -191,42 +168,6 @@ async def test_price_sync_preserves_tariff_ids_and_existing_payments(
                     await session.execute(
                         delete(Payment).where(Payment.id == payment_id)
                     )
-
-
-@pytest.fixture
-async def database() -> AsyncIterator[tuple[DatabaseHelper, Table]]:
-    database_url = os.getenv("TEST_DATABASE_URL")
-    if not database_url:
-        pytest.skip("Set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    url = make_url(database_url)
-    if (
-        url.drivername != "postgresql+asyncpg"
-        or not url.database
-        or not url.database.endswith("_test")
-    ):
-        pytest.fail("TEST_DATABASE_URL must use asyncpg and a database ending in _test")
-
-    helper = DatabaseHelper(url, pool_size=2, max_overflow=0)
-    metadata = MetaData()
-    table = Table(
-        f"session_probe_{uuid4().hex}",
-        metadata,
-        Column("id", Integer, primary_key=True),
-        Column("value", Integer, nullable=False),
-    )
-    created = False
-    try:
-        async with helper.engine.begin() as connection:
-            await connection.run_sync(metadata.create_all)
-        created = True
-        yield helper, table
-    finally:
-        try:
-            if created:
-                async with helper.engine.begin() as connection:
-                    await connection.run_sync(metadata.drop_all)
-        finally:
-            await helper.dispose()
 
 
 async def test_transaction_commits_on_success(
