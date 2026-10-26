@@ -10,9 +10,43 @@ from payment_service.services.calculations import calculate_payment
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_STATUS_TRANSITIONS = {
+    (PaymentStatus.PENDING, PaymentStatus.SUCCEEDED),
+    (PaymentStatus.PENDING, PaymentStatus.FAILED),
+    (PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED),
+}
+
 
 class TariffNotFoundError(Exception):
     pass
+
+
+class PaymentNotFoundError(Exception):
+    pass
+
+
+class InvalidTransitionError(Exception):
+    pass
+
+
+async def update_payment_status(
+    session: AsyncSession, payment_id: int, new_status: PaymentStatus
+) -> None:
+    async with session.begin():
+        payment = await payments_crud.get_payment_for_update(session, payment_id)
+        if payment is None:
+            raise PaymentNotFoundError
+        previous_status = payment.status
+        if (previous_status, new_status) not in ALLOWED_STATUS_TRANSITIONS:
+            raise InvalidTransitionError
+        payment.status = new_status
+
+    logger.info(
+        "Payment status changed: id=%s %s -> %s",
+        payment_id,
+        previous_status.value,
+        new_status.value,
+    )
 
 
 async def create_payment(

@@ -57,3 +57,17 @@ async def get_payment(session: AsyncSession, payment_id: int) -> Payment | None:
     if not -(2**31) <= payment_id < 2**31:
         return None
     return await session.get(Payment, payment_id)
+
+
+async def get_payment_for_update(
+    session: AsyncSession, payment_id: int
+) -> Payment | None:
+    if not -(2**31) <= payment_id < 2**31:
+        return None
+    result = await session.scalars(
+        select(Payment)
+        .where(Payment.id == payment_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return result.first()
