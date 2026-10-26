@@ -1,10 +1,14 @@
 import asyncio
+import hmac
+import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, Response
+from pydantic import SecretStr
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +17,24 @@ from payment_service.core.models import Payment, PaymentStatus, Tariff
 from payment_service.core.models.db_helper import DatabaseHelper
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
+
+PostWebhook = Callable[[dict[str, object]], Awaitable[Response]]
+
+
+@pytest.fixture
+def post_webhook(client: AsyncClient, webhook_secret: SecretStr) -> PostWebhook:
+    async def post(payload: dict[str, object]) -> Response:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        signature = hmac.digest(
+            webhook_secret.get_secret_value().encode("utf-8"), body, "sha256"
+        ).hex()
+        return await client.post(
+            "/webhooks/bank",
+            content=body,
+            headers={"Content-Type": "application/json", "X-Signature": signature},
+        )
+
+    return post
 
 
 async def payment_snapshot(
@@ -63,7 +85,7 @@ async def payment(
     ],
 )
 async def test_allowed_webhook_transitions(
-    client: AsyncClient,
+    post_webhook: PostWebhook,
     migrated_database: DatabaseHelper,
     payment: tuple[int, dict[str, object]],
     statuses: list[PaymentStatus],
@@ -73,8 +95,8 @@ async def test_allowed_webhook_transitions(
     caplog.set_level(logging.INFO, logger="payment_service.services.payments")
     caplog.clear()
     for status in statuses:
-        response = await client.post(
-            "/webhooks/bank", json={"payment_id": payment_id, "status": status.value}
+        response = await post_webhook(
+            {"payment_id": payment_id, "status": status.value}
         )
 
         assert response.status_code == 200
@@ -89,7 +111,7 @@ async def test_allowed_webhook_transitions(
 
 
 async def test_forbidden_webhook_transitions_leave_payment_unchanged(
-    client: AsyncClient,
+    post_webhook: PostWebhook,
     migrated_database: DatabaseHelper,
     payment: tuple[int, dict[str, object]],
 ) -> None:
@@ -113,9 +135,8 @@ async def test_forbidden_webhook_transitions_leave_payment_unchanged(
                     .values(status=current_status)
                 )
         for target in targets:
-            response = await client.post(
-                "/webhooks/bank",
-                json={"payment_id": payment_id, "status": target.value},
+            response = await post_webhook(
+                {"payment_id": payment_id, "status": target.value}
             )
 
             assert response.status_code == 409, (current_status, target)
@@ -127,7 +148,7 @@ async def test_forbidden_webhook_transitions_leave_payment_unchanged(
 
 
 async def test_unknown_payment_and_invalid_status(
-    client: AsyncClient,
+    post_webhook: PostWebhook,
     migrated_database: DatabaseHelper,
     payment: tuple[int, dict[str, object]],
 ) -> None:
@@ -137,14 +158,10 @@ async def test_unknown_payment_and_invalid_status(
             select(func.coalesce(func.max(Payment.id), 0) + 1)
         )
     for unknown_id in [missing_id, 10**30]:
-        response = await client.post(
-            "/webhooks/bank", json={"payment_id": unknown_id, "status": "succeeded"}
-        )
+        response = await post_webhook({"payment_id": unknown_id, "status": "succeeded"})
         assert response.status_code == 404
         assert response.json() == {"detail": "Payment not found"}
-    invalid = await client.post(
-        "/webhooks/bank", json={"payment_id": payment_id, "status": "unknown"}
-    )
+    invalid = await post_webhook({"payment_id": payment_id, "status": "unknown"})
     assert invalid.status_code == 422
     assert invalid.json()["detail"][0]["loc"] == ["body", "status"]
     assert await payment_snapshot(migrated_database, payment_id) == before
@@ -158,7 +175,7 @@ async def test_unknown_payment_and_invalid_status(
     ],
 )
 async def test_concurrent_webhooks_wait_for_row_lock(
-    client: AsyncClient,
+    post_webhook: PostWebhook,
     migrated_database: DatabaseHelper,
     payment: tuple[int, dict[str, object]],
     statuses: tuple[PaymentStatus, PaymentStatus],
@@ -198,10 +215,7 @@ async def test_concurrent_webhooks_wait_for_row_lock(
     responses = await asyncio.wait_for(
         asyncio.gather(
             *[
-                client.post(
-                    "/webhooks/bank",
-                    json={"payment_id": payment_id, "status": status.value},
-                )
+                post_webhook({"payment_id": payment_id, "status": status.value})
                 for status in statuses
             ]
         ),
@@ -223,4 +237,79 @@ async def test_concurrent_webhooks_wait_for_row_lock(
     assert await payment_snapshot(migrated_database, payment_id) == {
         **before,
         "status": winner,
+    }
+
+
+async def test_invalid_signature_does_not_access_database(
+    client: AsyncClient,
+    migrated_database: DatabaseHelper,
+    payment: tuple[int, dict[str, object]],
+    webhook_secret: SecretStr,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payment_id, before = payment
+    body = json.dumps({"payment_id": payment_id, "status": "succeeded"}).encode()
+    secret = webhook_secret.get_secret_value().encode()
+    signature = hmac.digest(secret, body, "sha256").hex()
+    wrong_secret_signature = hmac.digest(
+        b"another-synthetic-secret", body, "sha256"
+    ).hex()
+    cases: list[tuple[bytes, list[tuple[str, str]]]] = [
+        (body, []),
+        (body, [("X-Signature", wrong_secret_signature)]),
+        (body, [("X-Signature", "not-hex")]),
+        (body, [("X-Signature", "z" * 64)]),
+        (body.replace(b"succeeded", b"failed"), [("X-Signature", signature)]),
+        (b"{broken-json", []),
+        (body, [("X-Signature", signature), ("X-Signature", signature)]),
+    ]
+    caplog.clear()
+    # No rejected request may even obtain a database session.
+    with patch.object(
+        migrated_database, "session", side_effect=AssertionError("Database accessed")
+    ) as session:
+        for request_body, headers in cases:
+            response = await client.post(
+                "/webhooks/bank",
+                content=request_body,
+                headers=[("Content-Type", "application/json"), *headers],
+            )
+            assert response.status_code == 401
+            assert response.json() == {"detail": "Invalid signature"}
+        session.assert_not_called()
+
+    assert await payment_snapshot(migrated_database, payment_id) == before
+    assert webhook_secret.get_secret_value() not in caplog.text
+    assert signature not in caplog.text
+    assert wrong_secret_signature not in caplog.text
+    assert str(before["email"]) not in caplog.text
+
+
+async def test_signature_uses_original_body_bytes(
+    client: AsyncClient,
+    migrated_database: DatabaseHelper,
+    payment: tuple[int, dict[str, object]],
+    webhook_secret: SecretStr,
+) -> None:
+    payment_id, before = payment
+    payload = {"payment_id": payment_id, "status": "succeeded"}
+    body = json.dumps(payload, indent=2).encode("utf-8")
+    signature = hmac.digest(
+        webhook_secret.get_secret_value().encode("utf-8"), body, "sha256"
+    ).hex()
+    headers = {"Content-Type": "application/json", "X-Signature": signature}
+
+    accepted = await client.post("/webhooks/bank", content=body, headers=headers)
+    reformatted = await client.post(
+        "/webhooks/bank",
+        content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers=headers,
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json() == {"result": "ok"}
+    assert reformatted.status_code == 401
+    assert await payment_snapshot(migrated_database, payment_id) == {
+        **before,
+        "status": PaymentStatus.SUCCEEDED,
     }

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.logging.log_level)
+    application.state.webhook_secret = settings.webhook_secret
     db_helper = DatabaseHelper(
         url=settings.db.url,
         pool_size=settings.db.pool_size,

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -48,12 +48,21 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     run: RunConfig = Field(default_factory=RunConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tariffs: TariffsConfig = Field(default_factory=TariffsConfig)
     db: DatabaseConfig
+    webhook_secret: SecretStr = Field(min_length=1, repr=False)
+
+    @field_validator("webhook_secret")
+    @classmethod
+    def check_webhook_secret(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("WEBHOOK_SECRET must not be empty")
+        return value
 
 
 @lru_cache
