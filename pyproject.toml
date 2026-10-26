@@ -6,7 +6,7 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 files = ["payment_service", "tests", "alembic"]
 strict = true
 plugins = ["pydantic.mypy"]
