@@ -1,30 +1,14 @@
-from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import delete, func, select
 
-from payment_service.core.config import TariffsConfig
 from payment_service.core.models import Payment, PaymentMethod, PaymentStatus, Tariff
 from payment_service.core.models.db_helper import DatabaseHelper
-from payment_service.main import create_app
-from payment_service.services.tariffs import sync_tariffs
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
-
-
-@pytest.fixture
-async def client(migrated_database: DatabaseHelper) -> AsyncIterator[AsyncClient]:
-    async with migrated_database.session() as session:
-        await sync_tariffs(session, TariffsConfig())
-    application = create_app()
-    application.state.db_helper = migrated_database
-    async with AsyncClient(
-        transport=ASGITransport(app=application), base_url="http://testserver"
-    ) as http_client:
-        yield http_client
 
 
 async def test_get_tariffs(

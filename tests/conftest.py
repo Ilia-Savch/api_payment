@@ -4,11 +4,15 @@ from uuid import uuid4
 
 import pytest
 from alembic.config import Config
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import Column, Connection, Integer, MetaData, Table
 from sqlalchemy.engine import make_url
 
 from alembic import command
+from payment_service.core.config import TariffsConfig
 from payment_service.core.models.db_helper import DatabaseHelper
+from payment_service.main import create_app
+from payment_service.services.tariffs import sync_tariffs
 
 
 @pytest.fixture
@@ -64,3 +68,15 @@ async def migrated_database(database: tuple[DatabaseHelper, Table]) -> DatabaseH
     async with helper.engine.begin() as connection:
         await connection.run_sync(migrate)
     return helper
+
+
+@pytest.fixture
+async def client(migrated_database: DatabaseHelper) -> AsyncIterator[AsyncClient]:
+    async with migrated_database.session() as session:
+        await sync_tariffs(session, TariffsConfig())
+    application = create_app()
+    application.state.db_helper = migrated_database
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://testserver"
+    ) as http_client:
+        yield http_client

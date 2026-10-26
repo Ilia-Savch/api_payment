@@ -7,6 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from payment_service.core.models.tariff import Tariff
 
 
+async def get_tariff(session: AsyncSession, tariff_id: int) -> Tariff | None:
+    if not -(2**31) <= tariff_id < 2**31:
+        return None
+    return await session.get(Tariff, tariff_id)
+
+
 async def get_tariffs(session: AsyncSession) -> Sequence[Tariff]:
     result = await session.scalars(select(Tariff).order_by(Tariff.id))
     return result.all()
