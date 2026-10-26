@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-.PHONY: check lint format-check typecheck test
+.PHONY: check lint format-check typecheck test migrate
 
 check: lint format-check typecheck test
 
@@ -15,3 +15,6 @@ typecheck:
 
 test:
 	$(PYTHON) -m pytest
+
+migrate:
+	$(PYTHON) -m alembic upgrade head

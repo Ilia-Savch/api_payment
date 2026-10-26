@@ -1,0 +1,66 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment: &app-environment
+      RUN__HOST: 0.0.0.0
+      RUN__PORT: "8000"
+      LOGGING__LOG_LEVEL: ${LOGGING__LOG_LEVEL:-info}
+      TARIFFS__BASIC_PRICE: ${TARIFFS__BASIC_PRICE:-990000}
+      TARIFFS__STANDARD_PRICE: ${TARIFFS__STANDARD_PRICE:-1990000}
+      TARIFFS__PREMIUM_PRICE: ${TARIFFS__PREMIUM_PRICE:-2990000}
+      DB__HOST: postgres
+      DB__PORT: "5432"
+      DB__NAME: ${DB__NAME:-payments}
+      DB__USER: ${DB__USER:-payments}
+      DB__PASSWORD: ${DB__PASSWORD:?Set DB__PASSWORD in .env}
+      DB__POOL_SIZE: ${DB__POOL_SIZE:-5}
+      DB__MAX_OVERFLOW: ${DB__MAX_OVERFLOW:-10}
+    ports:
+      - "${RUN__PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3).close()"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  migrate:
+    build: .
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: *app-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB__NAME:-payments}
+      POSTGRES_USER: ${DB__USER:-payments}
+      POSTGRES_PASSWORD: ${DB__PASSWORD:?Set DB__PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${DB__PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres_data:
